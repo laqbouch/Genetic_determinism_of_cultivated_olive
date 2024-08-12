@@ -238,12 +238,112 @@ for (i in 1:100) {
   results <- data.frame(Observed = pheno_valid, Predicted = predicted_values, Genotype = genotype_valid)
   mean_predictions_per_genotype[[i]] <- aggregate(Predicted ~ Genotype, data = results, FUN = mean)
 }
-# Plot the distribution of accuracy (correlations)
-mean_accuracy <- mean(correlations_RR)
-print(paste("Mean Accuracy (RR):", mean_accuracy))
-vioplot(correlations_RR, col="cadetblue1", names="Accuracy (RR)",
-        main="Distribution of Accuracy (RR)", ylim = c(0.3, 0.8))
-# Plot mean predictions per genotype
-for (i in 1:100) {
-  points(mean_predictions_per_genotype[[i]]$Predicted, mean_predictions_per_genotype[[i]]$Genotype, col = rgb(0, 0, 1, 0.1), pch = 20)
+#run semi parametric RKHS model
+#Pheno and geno data
+X <- genot.ok
+Y <- pheno
+#run the model with 100 repetition
+# Initialize lists for storing overall results
+PA_rkhs_all <- numeric(100)  
+n <- nrow(X)
+
+for (iteration in 1:100) {
+  # Create indices for training and validation
+  set.seed(iteration)  # For reproducibility
+  indices <- sample(n)  # generate indices
+  train_indices <- indices[1:(4*n/5)]
+  val_indices <- setdiff(1:n, train_indices)  # The rest of the indices for validation
+  
+  # Subset the data
+  X_train <- X[train_indices, ]
+  X_val <- X[val_indices, ]
+  Y_train <- Y[train_indices]
+  Y_val <- Y[val_indices]
+  
+  #combine the X geno data
+  X_ordered <- rbind(X_train, X_val)
+  # Compute D and then K for training data
+  p <- ncol(X_ordered)
+  D <- (as.matrix(dist(X_ordered, method="euclidean"))^2) / p
+  h <- round(1 / median(D[row(D) > col(D)]), 2)
+  h <- h * c(1/5, 1, 5)
+  
+  K1 <- exp(-h[1] * D)
+  K2 <- exp(-h[2] * D)
+  K3 <- exp(-h[3] * D)
+  K3[1:5,1:5]
+  # Kernel averaging
+  ETA <- list(
+    list(K = K1, model = "RKHS"),
+    list(K = K2, model = "RKHS"),
+    list(K = K3, model = "RKHS")
+  )
+  # Combine training and validation phenotypes for BGLR
+  Ytr_FFB2 <- c(Y_train, rep(NA, length(Y_val)))
+  #Ytr_FFB2 <- Y_train
+  
+  # Multi-kernel RKHS 
+  print(paste("RKHS iteration", iteration))
+  
+  # Initialize lists for storing results
+  y_pred_VAL_rkhs_list <- list()
+  PA_rkhs <- vector()
+  
+  # Train and validate the model
+  
+    fmRKHS <- BGLR(y = Ytr_FFB2, ETA = ETA, nIter = 10000, burnIn = 5000, 
+                   thin = 10, verbose = FALSE)
+    
+    y_pred_VAL_rkhs <- fmRKHS$yHat[(length(Y_train) + 1):length(fmRKHS$yHat)]
+    
+    y_pred_VAL_rkhs_list[[iteration]] <- y_pred_VAL_rkhs
+    PA_rkhs <- cor(y_pred_VAL_rkhs, Y_val)
+  
+    # Store the predictive accuracy for this iteration
+    PA_rkhs_all[iteration] <- PA_rkhs
+
+    # Optionally print progress
+    print(paste("Iteration:", iteration, "PA:", PA_rkhs))
 }
+
+# Output overall results
+# Compute and output the average predictive accuracy across all iterations
+mean_PA_rkhs <- mean(PA_rkhs_all)
+#export accuracy values
+write.csv(PA_rkhs_all,file = "accuracies_RKHS1.csv")
+
+#plot the the combined data from the three model: RKHS, RR and LASSO
+accuracies_RKHS <- read_csv("accuracies_RKHS1.csv")
+
+combined_data_all <- list(correlations_LASSO, correlations_RR,accuracies_RKHS$x )
+# Running the Wilcoxon signed-rank test
+group <- rep(c("LASSO", "RR", "RKHS"), each = 100)
+values <- unlist(combined_data_all)
+data <- data.frame(Group = group, Value = values)
+
+# Perform pairwise Wilcoxon tests
+wilcox_results <- data %>%
+  wilcox_test(Value ~ Group, p.adjust.method = "BH")
+p_value <- wilcox_results$p
+
+# Printing the results
+print(wilcox_test_result)
+data_violin <- data.frame(
+  Value = c(rnorm(100, mean = 0.7, sd = 0.1),
+            rnorm(100, mean = 0.6, sd = 0.1),
+            rnorm(100, mean = 0.65, sd = 0.1)),
+  Model = rep(c("LASSO", "RR", "RKHS"), each = 100))
+
+png(file="Distribution_of_Accuracies_new.png",width = 750, height = 835, res = 110)
+vioplot(combined_data_all, 
+        col = c("cadetblue1", "cadetblue1", "cadetblue1"),
+        names = c("LASSO", "RR", "RKHS"),
+        ylim = c(0, 1), 
+        ylab = "",  # Set y-axis label to empty
+        xlab = "")  # Set x-axis label to empty
+
+# Add axis titles with larger text size
+title(xlab = "Genomic Prediction Model", cex.lab = 1.25)  
+title(ylab = "Accuracy", cex.lab = 1.25)  
+dev.off()
+
