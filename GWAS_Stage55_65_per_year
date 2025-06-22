@@ -1,0 +1,653 @@
+library(ggplot2)
+
+library(anyLib)
+anyLib(c("devtools", "emma","apercu","corpcor","data.table","MM4LMM","qqman",
+         "tibble","readxl","LEA","readr", "hierfstat","MASS","PerformanceAnalytics","tidyverse"))
+library(dplyr)
+library(statgenGWAS)
+library(gplots)
+library(RColorBrewer)
+library(MASS)
+library(dplyr)
+library(gridExtra)
+library(lme4)
+library(ggpubr)
+library(tidyr)
+
+
+
+###Import geno data
+SNP <- read_delim("positions.txt", 
+                  delim = "\t", escape_double = FALSE, 
+                  col_names = FALSE, trim_ws = TRUE)
+
+ap(SNP)
+names <- read_csv("sample_names.txt", 
+                  col_names = FALSE)
+ap(names)
+###Genotype
+imputed_geno_LFMM <- read_table("Oe9_CHR_scaff_WOGBM_NA_SNP_90_NA_indiv_25_MAC1_MAF_5_nuclear.lfmm_imputed.lfmm", 
+                                col_names = FALSE)
+head(imputed_geno_LFMM)
+dim(imputed_geno_LFMM)
+genot.imp <- imputed_geno_LFMM
+SNP$positions <- paste(SNP$X1,"_",SNP$X2, sep = "")
+ap(genot.imp)
+
+##add cultivar names
+dim(genot.imp)
+ap(genot.imp) 
+genot.mat <- as.matrix(genot.imp)
+ap(genot.mat)
+rownames(genot.mat) <- names$X1
+colnames(genot.mat) <- SNP$positions
+class(genot.mat)
+dim(genot.mat)
+genot.mat[1:20,1:3]
+#MAF allele should be coded 012
+p <- colMeans(genot.mat) / 2
+q <- 1 - p
+maf <- apply(cbind(p, q), 1, min)
+ap(maf)
+
+#png(file="MAF_before_filter_imputed_SNMF.png")
+hist(maf, col = "grey", main = "", breaks = 50, xlim = c(0, 0.5))
+#dev.off()
+##filter MAF at 0.05
+sum(maf < 0.05)
+genot.ok <- genot.mat[, maf >= 0.05]
+dim(genot.ok)
+##verif
+p <- colMeans(genot.ok) / 2
+q <- 1 - p
+maf <- apply(cbind(p, q), 1, min)
+#png(file="MAF_after_filter_0.05_imputed_SNMF.png")
+hist(maf, col = "grey", main = "", breaks = 50, xlim = c(0, 0.5))
+#dev.off()
+dim(t(genot.ok))
+ap(genot.ok)
+
+#clean environement
+rm(genot.mat, genot.imp, maf, p, q)
+# Write the content to "genot_ok.geno"
+write.table(t(genot.ok), "genot_ok.geno", sep = "", quote = FALSE, col.names = T, row.names = F)
+####Carte
+map <- SNP[, c(3, 1, 2)]
+colnames(map) <- c('SNP','Chr','Pos')
+class(map)
+dim(map)
+ap(map)
+# Replace String with Another Stirng, we replmace s of scaff by 9
+map$Chr <- sub('9','',map$Chr)
+map$Chr <- sub('s','9',map$Chr)
+map$Chr <- gsub('[Oe_LG]','',map$Chr)
+ap(map)
+tail(map)
+#write.csv(map , "map.csv", row.names=T)
+
+# filter conserved SNP
+map <- map[map$SNP %in% colnames(genot.ok), ]
+map$Chr <- as.numeric(map$Chr)
+dim(map)
+head(map)
+tail(map)
+
+#order by chromosome and position 
+map <- map[order(map$Pos), ]
+map <- map[order(map$Chr), ]
+head(map)
+tail(map)
+dim(map)
+#write.csv(map, "ordered_map.csv", row.names=T)
+#write.csv(colnames(genot.ok), "colnames(genot.ok).csv", row.names=T)
+#################################################################################
+###############  Import pheno data and characterize stages  #####################
+#################################################################################
+Pheno_7yrs_FD_clean <- read_excel("Pheno_7yrs_FD_clean.xlsx")
+ap(Pheno_7yrs_FD_clean)
+pheno_all <- Pheno_7yrs_FD_clean[, c(6,7,10,11,13,14)]
+head(pheno_all)
+#estimation of heritability for different stages
+stages <- c("Stage_55", "Stage_60", "Stage_65", "Stage_69")
+# Initialize a list to store heritability results
+heritability_results <- list()
+subset_data <- function(data, column_name) {
+  data[, c("Name_on_cluster", "year", column_name)]
+}
+# Loop through each stage
+for (stage in stages) {
+  # Subset data for the current year and stage
+  stage_data <- subset_data(pheno_all, stage)
+  # Remove rows with NA values for the current year and stage
+  stage_data <- na.omit(stage_data)
+  stage_data$year <- as.factor(stage_data$year)
+  # Fit linear mixed model
+  formula <- as.formula(paste(stage, "~ (1 | Name_on_cluster) + (1 | Name_on_cluster:year) +year"))
+  model <- lmer(formula, data = stage_data)
+  tabvar=as.data.frame(VarCorr(model))
+  varinter = tabvar[1,4]
+  varGeno = tabvar[2,4]
+  varRes = tabvar[3,4]
+  H2 = varGeno / (varGeno + varinter/7 + varRes/(mean(table(pheno_all$Name_on_cluster,
+                                                            pheno_all$year))*7))
+  H2
+  # Store the heritability result
+  heritability_results[[stage]] <- H2
+}
+
+# Print heritability estimates for each stage
+heritability_results
+
+# Remove rows where "Name_on_cluster" is NA
+pheno_all <- pheno_all[!is.na(pheno_all$Name_on_cluster), ]
+
+# Calculate the mean per "Name_on_cluster" per year
+mean_per_cluster_year <- pheno_all %>%
+  group_by(Name_on_cluster, year) %>%
+  summarise(across(starts_with("Stage"), ~ mean(.x, na.rm = TRUE), .names = "mean_{col}"))
+write.csv(mean_per_cluster_year, "mean_per_stage_55_60_65_69_yearly.csv", row.names = FALSE)
+
+unique_correlations <- list()
+calculate_correlations <- function(data, year) {
+  # Filter data for the given year
+  data_year <- data %>% 
+    filter(year == !!year) %>%
+    ungroup()  # Remove any existing grouping
+  
+  # Select columns containing stage values
+  stages_data <- data_year %>% select(starts_with("mean_Stage"))
+  # Calculate correlation matrix
+  correlation_matrix <- cor(stages_data, use = "pairwise.complete.obs", method = "pearson")
+  correlation_matrix <- round(correlation_matrix, digits = 2)
+  
+  # Convert the correlation matrix to a tidy format
+  correlation_tidy <- as.data.frame(as.table(correlation_matrix))
+  colnames(correlation_tidy) <- c("Stage1", "Stage2", "Correlation")
+  
+  correlation_tidy <-  correlation_tidy %>%
+    filter(Stage1 != Stage2)
+  correlation_tidy <- correlation_tidy %>%
+    mutate(Stage1 = gsub("mean_", "", Stage1),  # Removing "mean_" from Stage1 column
+           Stage2 = gsub("mean_", "", Stage2))  # Removing "mean_" from Stage2 column
+  # Identify duplicates with reversed order of stages
+  duplicates <- correlation_tidy[duplicated(paste(pmin(correlation_tidy$Stage1, 
+                                                       correlation_tidy$Stage2), pmax(correlation_tidy$Stage1, correlation_tidy$Stage2))), ]
+  
+  # Remove duplicates
+  unique_correlations <- correlation_tidy[!duplicated(paste(pmin(correlation_tidy$Stage1, 
+                                                                 correlation_tidy$Stage2), pmax(correlation_tidy$Stage1, correlation_tidy$Stage2))), ]
+  
+  unique_correlations$Year <- year
+  
+  return(unique_correlations)
+}
+unique_years <- unique(mean_per_cluster_year$year)
+#select years to analyse
+unique_years <- c("2015", "2016","2018", "2019","2021")
+#select stages
+# Select the specified columns
+mean_per_cluster_year <- mean_per_cluster_year %>%
+  select(Name_on_cluster, year, mean_Stage_55, mean_Stage_65)
+# Loop through each year and calculate pairwise correlations
+for (year in unique_years) {
+  yearly_correlations <- calculate_correlations(mean_per_cluster_year, year)
+  unique_correlations <- bind_rows(unique_correlations, yearly_correlations)
+  #unique_correlations <- bind_rows(unique_correlations, yearly_correlations)
+}
+write.csv(unique_correlations, "pairwise_stage_correlations1.csv", row.names = FALSE)
+#calculate correlation per stage between years
+filtered_data_stg55<- mean_per_cluster_year %>%
+  select(Name_on_cluster, year, mean_Stage_55)
+filtered_data_stg55<- filtered_data_stg55%>%
+  filter(!year %in% c(2014, 2017))
+
+wide_data_cleaned <- filtered_data_stg55%>%
+  pivot_wider(names_from = year, values_from = mean_Stage_55)
+# Compute pairwise correlations
+years <- colnames(wide_data_cleaned)[-1] # Exclude the 'Name_on_cluster' column
+# Initialize a matrix to store the pairwise correlations
+correlation_matrix <- matrix(NA, nrow = length(years), ncol = length(years),
+                             dimnames = list(years, years))
+
+# Compute pairwise correlations and populate the matrix
+for (i in 1:(length(years) - 1)) {
+  for (j in (i + 1):length(years)) {
+    correlation_matrix[i, j] <- cor(wide_data_cleaned[[years[i]]], wide_data_cleaned[[years[j]]], use = "complete.obs")
+    correlation_matrix[i, j] <- cor(wide_data_cleaned[[years[i]]], wide_data_cleaned[[years[j]]], use = "complete.obs")
+    
+    correlation_matrix[j, i] <- correlation_matrix[i, j] # Correlation matrix is symmetric
+  }
+}
+
+correlation_matrix
+
+correlation_df <- as.data.frame(correlation_matrix)
+write.csv(correlation_df, file = "pairwise_correlations_stg55_between_years.csv", row.names = TRUE)
+
+#count the number of  cultivars common between years
+# Initialize a matrix to store the count of non-NA pairs
+count_matrix <- matrix(NA, nrow = length(years), ncol = length(years),
+                       dimnames = list(years, years))
+
+# Compute the number of non-NA pairs and populate the matrix
+for (i in 1:(length(years) - 1)) {
+  for (j in (i + 1):length(years)) {
+    # Count the number of non-NA pairs for the two years
+    count_non_na_pairs <- sum(!is.na(wide_data_cleaned[[years[i]]]) & !is.na(wide_data_cleaned[[years[j]]]))
+    count_matrix[i, j] <- count_non_na_pairs
+    count_matrix[j, i] <- count_non_na_pairs # The matrix is symmetric
+  }
+}
+
+# Convert the count matrix to a data frame for export
+count_df <- as.data.frame(count_matrix)
+
+# Export the count matrix to a CSV file
+write.csv(count_df, file = "pairwise_non_na_counts_between_years_stage65.csv", row.names = TRUE)
+
+
+
+#plot distribution per year
+#filter needed years only
+filtered_FD <- subset(mean_per_cluster_year, year %in% c(2015, 2016, 2018, 2019, 2021))
+stages <- c("mean_Stage_55", "mean_Stage_65")
+# Initialize an empty list to store results
+results_list <- list()
+
+# Loop through each stage and calculate descriptive statistics
+for (stage in stages) {
+  stats <- filtered_FD %>%
+    group_by(year) %>%
+    summarise(
+      mean = round(mean(.data[[stage]], na.rm = TRUE),2) ,
+      Variance = round(var(.data[[stage]], na.rm = TRUE),2) ,
+      min = round(min(.data[[stage]], na.rm = TRUE),2) ,
+      max = round(max(.data[[stage]], na.rm = TRUE),2) ,
+      median = round(median(.data[[stage]], na.rm = TRUE),2) ,
+      n = sum(!is.na(.data[[stage]]))
+    ) %>%
+    mutate(stage = stage)
+  
+  results_list[[stage]] <- stats
+}
+
+# Combine all results into a single dataframe
+combined_results <- bind_rows(results_list)
+filtered_FD$year <- factor(filtered_FD$year)
+
+# Export the combined dataframe to a CSV file
+write.csv(combined_results, "descriptive_statistics_stage55_65.csv", row.names = FALSE)
+#plot
+#plot nouvelle donner avec filtre sur 2019 std 55 outliers
+data_no_outliers <- read_csv("mean_per_stage_55_60_65_69_yearly_55_2019_no_outliers.csv")
+filtered_FD <- subset(data_no_outliers, year %in% c(2015, 2016, 2018, 2019, 2021))
+#Wilcoxon test
+wilcox_test_result <- pairwise.wilcox.test(filtered_FD$mean_Stage_55, filtered_FD$year,
+                                           p.adjust.method = "none")
+wilcox_test_result
+png("Distrution_mean_FD_65_stage_per_year_clean_2.png", width = 1000, height = 600,res = 100)  
+p <- ggplot(filtered_FD, aes(x = factor(year), y = mean_Stage_65 ,color=factor(year))) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, color = "red") +  # Add boxplot for clearer representation
+  theme_minimal() +
+  theme(legend.position="none") + stat_summary(fun.data="mean_sdl", mult=1, width=0.2 )+
+  stat_summary(fun.data=mean_sdl, mult=1, 
+               geom="pointrange", color="black")+
+  labs(x = "Year", y = "Mean Stage 65")+ 
+   ylim(70, 150)
+  #ggtitle("Distribution of Mean Stage 65 Across Years")
+p
+# Extract p-values from the Wilcoxon test results
+p_values <- wilcox_test_result$p.value
+p_with_significance <- p + 
+  stat_compare_means(comparisons=list(c("2015", "2016"), c("2015", "2018"), c("2015", "2019"), 
+                                      c("2015", "2021"), c("2016", "2018"), c("2016", "2019"), 
+                                      c("2016", "2021"), c("2018", "2019"), c("2019", "2021")),
+                     method="wilcox.test", label="p.signif",
+                     p.adjust.method="none", hide.ns=TRUE,
+                     comparisons_correction = NULL, p.values = p_values)
+p_with_significance
+
+dev.off()
+#################################################################################
+###############  Run GWAS MM4LMM for all stages  #####################
+#################################################################################
+
+# Define unique years and stages
+#stages <- c("mean_Stage_55", "mean_Stage_60", "mean_Stage_65", "mean_Stage_69")
+stages <- c("mean_Stage_55", "mean_Stage_65")
+unique_years <- c("2015", "2016","2018", "2019","2021")
+
+# Create a base output directory if it doesn't exist
+output_base <- "MM4LMM_Results"
+dir.create(output_base, showWarnings = FALSE)
+
+# Loop through each stage and year
+for (stage in stages) {
+  stage_dir <- file.path(output_base, stage)
+  dir.create(stage_dir, showWarnings = FALSE)
+  
+  for (year in unique_years) {
+    # Subset data for the current year and stage
+    year_data <- mean_per_cluster_year[mean_per_cluster_year$year == year, c("Name_on_cluster", stage)]
+    
+    # Remove rows with NA values for the current year and stage
+    year_data <- na.omit(year_data)
+    geno_names <- year_data$Name_on_cluster
+    
+    # Extract phenotype and genotype data
+    y <- year_data[[stage]]
+    names(y) <- geno_names
+    
+    genot_subset <- genot.ok[year_data$Name_on_cluster, ]
+    
+    # Order genotype to fit phenotype
+    genot_subset <- genot_subset[match(names(y), rownames(genot_subset)), ]
+    
+    # Create a directory for the current year results within the stage directory
+    year_dir <- file.path(stage_dir, paste0("Year_", year))
+    dir.create(year_dir, showWarnings = FALSE)
+    
+    png(file = file.path(year_dir, paste0("verif_genot_names_", year, ".png")), width = 1220, height = 675)
+    plot(match(rownames(genot_subset), names(y)))
+    dev.off()
+    
+    png(file = file.path(year_dir, paste0("verif_genot_SNP_", year, ".png")), width = 1220, height = 675)
+    plot(match(map$SNP, colnames(genot_subset)))
+    dev.off()
+    
+    # Convert genotype data to numeric
+    genot_subset <- as.matrix(genot_subset)
+    
+    # Compute genetic relationship matrix (K)
+    K <- beta.dosage(genot_subset)
+    K <- make.positive.definite(K)
+    
+    # Run MM4LMM GWAS analysis
+    mmest_K <- MMEst(Y = y, X = genot_subset, VarList = list(Additive = K, Error = diag(length(y))), Verbose = TRUE, Cofactor = NULL)
+    out_test_K <- AnovaTest(mmest_K)
+    
+    # Print or store GWAS results for the current year
+    ap(out_test_K)
+    #res.mm4lmm_K <- cbind(map, P = sapply(out_test_K, function(x){x["Xeffect", "pval"]}))
+    res.mm4lmm_K <- cbind(map, 
+                          P = sapply(out_test_K, function(x) x["Xeffect", "pval"]),
+                          SNP_effect = sapply(out_test_K, function(x) x["Xeffect", "Wald (Type III)"]))
+    
+    ap(res.mm4lmm_K)
+    # Save results
+    write.csv(res.mm4lmm_K, file = file.path(year_dir, paste0("Result_mm4lmm_p_values_", year, ".csv")), row.names = FALSE)
+    
+    png(file = file.path(year_dir, paste0("QQ_plot_mm4lmm_", stage, "_", year, ".png")))
+    qq(res.mm4lmm_K$P, main = paste0("Q-Q_plot_GWAS_MM4LMM_", stage, "_", year))
+    dev.off()
+    
+    # QQ plot with real values of p values
+    u <- runif(nrow(res.mm4lmm_K), 0, 1)
+    png(file = file.path(year_dir, paste0("QQ_p_values_mm4lmm_", stage, "_", year, ".png")))
+    qqplot(u, res.mm4lmm_K$P, main = paste0("QQ_p_values_mm4lmm_", stage, "_", year))
+    dev.off()
+    
+    # FDR correction
+    p_values <- res.mm4lmm_K$P
+    p_adjusted <- p.adjust(p_values, method = "fdr")
+    ap(p_adjusted)
+    p_adjusted_coor <- cbind(res.mm4lmm_K$SNP, res.mm4lmm_K$P, p_adjusted, res.mm4lmm_K$SNP_effect)
+    ap(p_adjusted_coor)
+    colnames(p_adjusted_coor) <- c("SNP", "P", "p_adjusted", "SNP_effect")
+    p_adjusted_coor <- as.data.frame(p_adjusted_coor)
+    dim(p_adjusted_coor)
+    
+    # Extract significant SNPs
+    signifSNPs <- p_adjusted_coor[p_adjusted_coor$p_adjusted < 0.05, ]
+    signifSNPs
+    dim(signifSNPs)
+    write.csv(signifSNPs, file = file.path(year_dir, paste0("Result_mm4lmm_K_sig_SNP_FDR_5_", year, ".csv")), row.names = FALSE)
+    
+    # Export all SNPs
+    write.csv(p_adjusted_coor, file = file.path(year_dir, paste0("Result_mm4lmm_K_sig_SNP_FDR_", year, ".csv")), row.names = FALSE)
+    
+    # Convert P and p_adjusted columns to numeric if they are not already
+    signifSNPs$P <- as.numeric(signifSNPs$P)
+    signifSNPs$p_adjusted <- as.numeric(signifSNPs$p_adjusted)
+    
+    # Sort the data frame by p_adjusted in descending order
+    signifSNPs_ordered <- signifSNPs[order(-signifSNPs$P), ]
+    
+    # Get the SNP with the highest p_adjusted
+    thresh <- signifSNPs_ordered[1, ]
+    
+    # Access the p_adjusted value of the most significant SNP
+    thresh <- thresh$P
+    res.mm4lmm_K_chr <- subset(res.mm4lmm_K, Chr %in% 1:23)
+    tail(res.mm4lmm_K_chr)
+    
+    if (!is.na(thresh)) {
+      png(file = file.path(year_dir, paste0("Manhat_mm4lmm_", stage, "_FDR5_CHR_", year, ".png")), res = 110, width = 1000, height = 400)
+      manhattan(res.mm4lmm_K_chr, chr = "Chr", bp = "Pos", p = "P",
+                suggestiveline = -log10(thresh),
+                col = c("navyblue", "orangered2"), 
+                ylim = c(0, 10),
+                genomewideline = -log10(thresh),
+                main = paste0(stage, "_MM4LMM_", year),
+                annotatePval = 0.00001,
+                cex.main = 0.8)
+      dev.off()
+    }
+      }
+}
+
+#combine significant SNPs for all years and stages
+combined_significant_snps <- list()
+for (stage in stages) {
+  stage_dir <- file.path("MM4LMM_Results", stage)
+  
+  for (year in unique_years) {
+    # Define the path to the significant SNP results file
+    sig_snps_file <- file.path(stage_dir, paste0("Year_", year), paste0("Result_mm4lmm_K_sig_SNP_FDR_5_", year, ".csv"))
+    
+    # Read the significant SNP results file
+    if (file.exists(sig_snps_file)) {
+      sig_snps_data <- read.csv(sig_snps_file)
+      
+      # Check if the data frame is not empty
+      if (nrow(sig_snps_data) > 0) {
+        # Adjust the stage name using regular expressions
+        adjusted_stage_name <- sub("mean_", "", stage)
+        sig_snps_data$Stage <- adjusted_stage_name
+        
+        # Add year column
+        sig_snps_data$Year <- year
+        
+        # Append to the combined significant SNPs list
+        combined_significant_snps[[paste0(stage, "_", year)]] <- sig_snps_data
+      }
+    }
+  }
+}
+
+# Combine all significant SNP results into a single data frame
+final_combined_significant_snps <- do.call(rbind, combined_significant_snps)
+
+# Save the final combined significant SNP results
+write.csv(final_combined_significant_snps, file = file.path("MM4LMM_Results", 
+                                                            "Combined_Significant_SNPs.csv"), row.names = FALSE)
+#focus on results of 2019 and 2021
+base_dir <- "D:/Mes Donnees/PhD/Bioinformatics/GWAS Analysis/GWAS_per_year_65_69/GWAS_stages_55_56_final/MM4LMM_Results"
+
+# Stades pour lesquels vous souhaitez comparer (par exemple)
+stages_to_compare <- c("mean_Stage_65")
+
+# Fonction pour générer les Manhattan plots
+generate_manhattan_plots <- function(stage, chr_data_2019, chr_data_2021, chr_num) {
+  # Créer un nouveau graphique
+  # Plot pour l'année 2019
+  png(file = file.path(base_dir,stage, paste0("Manhat_mm4lmm_", chr_num, "_2019_2021.png")), res = 110, width = 1000, height = 400)
+  
+  p1 <- ggplot(chr_data_2019, aes(x = Pos, y = -log10(P))) +
+    geom_point(size = 2, color = "black") +  # Définir la couleur des points en noir
+    geom_hline(yintercept = -log10(1e-5), linetype = "dashed", color = "red") +
+    labs(title = paste("Manhattan plot -", stage, "- Chr", chr_num, "- 2019"),
+         x = "Position (bp)", y = "-log10(P-value)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")+
+    ylim(0, 10)
+  
+  
+  # Plot pour l'année 2021
+  p2 <- ggplot(chr_data_2021, aes(x = Pos, y = -log10(P))) +
+    geom_point(size = 2, color = "black") +  # Définir la couleur des points en noir
+    geom_hline(yintercept = -log10(1e-5), linetype = "dashed", color = "red") +
+    labs(title = paste("Manhattan plot -", stage, "- Chr", chr_num, "- 2021"),
+         x = "Position (bp)", y = "-log10(P-value)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")+
+    ylim(0, 10)
+  
+  # Combinaison des deux graphiques en une grille
+  grid.arrange(p1, p2, ncol = 1)
+  dev.off()
+}
+
+
+## List of stages to compare
+stages_to_compare <- c("mean_Stage_65")
+
+# List of chromosome numbers (LGs) to loop over
+lg_list_65 <- c(
+  1, 3, 4, 5, 6, 11, 12, 13, 14, 16, 17, 19, 20, 21, 22,
+  "s00011", "s00054", "s00166", "s00228", "s00401", "s01929", "s01974",
+  "s02224", "s02421", "s02450", "s04326", "s05784", "s05787", "s05935",
+  "s05944", "s06013", "s06031", "s06115", "s06268", "s06308", "s06344",
+  "s07742", "s07747", "s07875", "s07922", "s08027", "s09731", "s09771",
+  "s10061"
+)
+
+stages_to_compare <- c("mean_Stage_55")
+lg_list_55 <- c(8, 9, 19,
+                "s00308", "s00555", "s02095", "s02262", "s02315", "s02570", "s03917", "s03927",
+                "s05916", "s06228", "s07785", "s08223", "s09929"
+)
+
+
+chromosome_numbers <-lg_list_55
+# Loop through each chromosome number
+for (chr_num in chromosome_numbers) {
+  # Loop through each stage to compare
+  for (stage in stages_to_compare) {
+    stage_dir <- file.path(base_dir, stage)
+    
+    # Read data for the year 2019
+    file_2019 <- file.path(stage_dir, "Year_2019", paste0("Result_mm4lmm_K_sig_SNP_FDR_2019.csv"))
+    data_2019 <- read.csv(file_2019)
+    
+    # Read data for the year 2021
+    file_2021 <- file.path(stage_dir, "Year_2021", paste0("Result_mm4lmm_K_sig_SNP_FDR_2021.csv"))
+    data_2021 <- read.csv(file_2021)
+    
+    # Filter data for the specific chromosome number
+    chr_data_2019 <- subset(data_2019, Chr == chr_num)
+    chr_data_2021 <- subset(data_2021, Chr == chr_num)
+    
+    # Generate Manhattan plots for the current chromosome number and stage
+    generate_manhattan_plots(stage, chr_data_2019, chr_data_2021, chr_num)
+  }
+}
+
+#common genotypes between year for the same stage (stage 65 and years 2019 and 2021)
+# Stage and years of interest
+filtered_data <- mean_per_cluster_year %>%
+  filter(year %in% c(2019, 2021),
+         !is.na(mean_Stage_55))
+
+common_names <- filtered_data %>%
+  group_by(Name_on_cluster) %>%
+  filter(all(c(2019, 2021) %in% year)) %>%
+  summarise(count = n_distinct(Name_on_cluster))
+
+common_count_55_2021_2019 <- nrow(common_names)
+#Etude de l'effet du genotype pour l'année 2016 std 65 et55
+pheno_all
+#data of 2016
+Dataset <- pheno_all %>%
+  filter(year == 2021)
+
+
+#stg 55
+mod0 = lmer(Stage_55 ~  (1|Name_on_cluster) , data=Dataset)
+#print(mod0)
+tabvar=as.data.frame(VarCorr(mod0))
+varGeno=tabvar[1,4]
+varRes=tabvar[2,4]
+varGeno
+varRes
+#H2 = varGeno/(varGeno+varRes/mean(table(Dataset$Name_on_cluster, Dataset$year)))
+#print('h² mod0')
+#print(H2)
+
+aov_modint <- aov(Stage_55 ~  Name_on_cluster, data = Dataset)
+summary(aov_modint)
+
+#stge 65
+mod0 = lmer(Stage_65 ~  (1|Name_on_cluster) , data=Dataset)
+#print(mod0)
+tabvar=as.data.frame(VarCorr(mod0))
+varGeno=tabvar[1,4]
+varRes=tabvar[2,4]
+varGeno
+varRes
+#H2 = varGeno/(varGeno+varRes/mean(table(Dataset$Name_on_cluster, Dataset$year)))
+#print('h² mod0')
+#print(H2)
+
+aov_modint <- aov(Stage_65 ~  Name_on_cluster, data = Dataset)
+summary(aov_modint)
+
+#Extract SNP effects
+#import SNP effects
+
+year <- "2018"
+stage <- "mean_Stage_65"
+year_data <- mean_per_cluster_year[mean_per_cluster_year$year == year, 
+                                   c("Name_on_cluster", stage)]
+
+# Remove rows with NA values for the current year and stage
+year_data <- na.omit(year_data)
+geno_names <- year_data$Name_on_cluster
+
+# Extract phenotype and genotype data
+y <- year_data[[stage]]
+names(y) <- geno_names
+
+#filter only common genotypes
+# Subset genot.ok to keep rows (individuals) that are present in `y`
+common_individuals <- intersect(rownames(genot.ok), names(y))
+
+# Subset both genot.ok and y to keep only common individuals
+genot.ok_filtered <- genot.ok[common_individuals, ]
+y_filtered <- y[common_individuals]
+Common_snps <- c("Oe9_LG05_8251336", 
+          "Oe9_LG01_35191624", 
+          "Oe9_LG01_35191735", 
+          "Oe9_LG05_4995420", 
+          "Oe9_s00148_410451", 
+          "Oe9_s00250_101875", 
+          "Oe9_s00376_47106", 
+          "Oe9_s00376_47107", 
+          "Oe9_s00376_47233")
+
+
+for (i in Common_snps) {
+  #png(file=paste0("Effect_signif_",stage,"_",i,".png"))
+  
+  boxplot(y_filtered ~ genot.ok_filtered[, i], varwidth = T, main = i, xlab = "",
+          ylab = stage,col="mediumseagreen")
+  mtext(text = c("n=  ", table(genot.ok[, i])), side = 1,
+        at = c(0.5, 1, 2, 3), line = 3)
+  
+  #dev.off()
+}
+
+
+
+                  
